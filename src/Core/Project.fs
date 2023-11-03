@@ -57,6 +57,7 @@ module Project =
         |> Configuration.get [| ".git"; "paket-files"; ".fable"; "packages"; "node_modules" |]
 
     let deepLevel = "FSharp.workspaceModePeekDeepLevel" |> Configuration.get 2 |> max 0
+    let autoLoadWorkspace = "FSharp.autoLoadWorkspace" |> Configuration.get true
 
     let isNetCoreApp (project: Project) =
         project.Info.TargetFramework :: project.Info.TargetFrameworks
@@ -642,7 +643,7 @@ module Project =
                 setAnyProjectContext true
         | None -> ()
 
-    let private initWorkspaceHelper x =
+    let private initWorkspaceHelper (context: ExtensionContext) x =
         clearLoadedProjects ()
         loadedWorkspace <- Some x
         workspaceChangedEmitter.fire x
@@ -657,15 +658,41 @@ module Project =
         | WorkspacePeekFound.Directory _ when not (projs |> Array.isEmpty) -> setAnyProjectContext true
         | _ -> ()
 
-        projs |> List.ofArray |> LanguageService.workspaceLoad |> Promise.map ignore
+        if autoLoadWorkspace then 
+            projs |> List.ofArray |> LanguageService.workspaceLoad |> Promise.map ignore
+        else
+            commands.registerCommand (
+                "fsharp.loadProjects",
+                (fun _ ->
+                    let quickPickItem (projPath: string) =
+                        let item = createEmpty<QuickPickItem>
+                        item.label <- projPath
+                        // item.description <- Some(sprintf "Directory with %i projects" dir.Fsprojs.Length)
+                        item
 
+                    let chooseFrom = projs |> Array.map quickPickItem |> ResizeArray
+                    let opts = createEmpty<QuickPickOptions>
+                    window.showQuickPick (chooseFrom |> U2.Case1, opts)
+                    |> Promise.ofThenable
+                    |> Promise.bind (fun chosen ->
+                        match chosen with
+                        | Some chosen ->
+                            LanguageService.workspaceLoad [chosen.label] |> ignore
+                            Promise.lift ()
+                        | None -> Promise.lift ())
+                    |> box
+                    |> Some
+                )
+            )
+            |> context.Subscribe
+            Promise.lift(())
 
-    let initWorkspace () =
+    let initWorkspace (context: ExtensionContext) =
         getWorkspace ()
         |> Promise.bind (function
             | Some x -> Promise.lift x
             | None -> getWorkspaceForModeIonideSearch ())
-        |> Promise.bind (initWorkspaceHelper)
+        |> Promise.bind (initWorkspaceHelper context)
 
     module internal ProjectStatus =
         let mutable timer = None
@@ -744,7 +771,7 @@ module Project =
                 workspacePeek ()
                 |> Promise.bind (fun x -> pickFSACWorkspace x (CurrentWorkspaceConfiguration.get ()))
                 |> Promise.bind (function
-                    | Some w -> initWorkspaceHelper w
+                    | Some w -> initWorkspaceHelper context w
                     | None -> Promise.empty)
                 |> box
                 |> Some)
@@ -760,4 +787,4 @@ module Project =
         )
         |> context.Subscribe
 
-        initWorkspace ()
+        initWorkspace context
